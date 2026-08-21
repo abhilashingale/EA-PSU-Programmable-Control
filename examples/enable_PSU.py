@@ -14,9 +14,21 @@ import sys
 from ea_psu_control import DEFAULT_PORT, PS2000B
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    """Replaces argparse's usage/traceback-style error output with a plain,
+    hardware-appropriate message: don't power on anything if the arguments
+    weren't understood."""
+
+    def error(self, message):
+        print("Voltage & Current Limits not configured!")
+        print("Exiting power-on for safety reasons!")
+        raise SystemExit(1)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Enable the PSU output at a configured voltage and current limit."
+    parser = _SafeArgumentParser(
+        description="Enable the PSU output at a configured voltage and current limit.",
+        usage="enable_PSU.py --volt VOLT --amp AMP [--port PORT]",
     )
     parser.add_argument("--volt", type=float, default=None, help="Voltage setpoint, in volts")
     parser.add_argument("--amp", type=float, default=None, help="Current limit, in amps")
