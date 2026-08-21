@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Enable the PSU output at a caller-specified voltage and current limit.
 
-Usage: python enable_PSU.py --volt 24 --amp 5 [--port /dev/ttyACM0]
+Usage: python examples/enable_PSU.py --volt 24 --amp 5 [--port /dev/ttyACM0]
 
 Both --volt and --amp are required; the script refuses to power on the
 output without an explicit setpoint. Prompts for confirmation before
