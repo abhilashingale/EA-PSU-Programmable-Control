@@ -9,12 +9,19 @@ telegram semantics follow Elektro-Automatik's "object_list_ps2000b.pdf" /
 from __future__ import annotations
 
 import struct
+import time
 from typing import Optional
 
 import serial
 
 from . import protocol
 from .exceptions import PSULimitError
+
+# Elektro-Automatik's programming guide requires at least 50ms between
+# telegrams; the reference driver enforces this by using a 60ms read
+# timeout and letting every call block for it. We enforce it explicitly
+# instead, so a read of the exact response length isn't held up by it.
+MIN_COMMAND_INTERVAL = 0.05
 
 # Object numbers, per object_list_ps2000b.pdf.
 OBJ_DEVICE_TYPE = 0
@@ -78,6 +85,8 @@ class PS2000B:
             parity=serial.PARITY_ODD,
             timeout=timeout,
         )
+        self._last_transfer_at: Optional[float] = None
+
         # Setpoints are percent-of-nominal, so we need these to convert.
         self.nominal_voltage = self._read_float(OBJ_NOMINAL_VOLTAGE)
         self.nominal_current = self._read_float(OBJ_NOMINAL_CURRENT)
@@ -97,28 +106,53 @@ class PS2000B:
 
     # -- low-level transfer -------------------------------------------------
 
-    def _transfer(self, telegram_type: int, obj: int, data: bytes = b"") -> bytes:
+    def _wait_for_min_interval(self) -> None:
+        if self._last_transfer_at is None:
+            return
+        remaining = MIN_COMMAND_INTERVAL - (time.monotonic() - self._last_transfer_at)
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _transfer(
+        self, telegram_type: int, obj: int, data: bytes = b"", expected_data_len: int = 16
+    ) -> bytes:
+        """Send one telegram and read back exactly the response it implies.
+
+        `expected_data_len` is the DATA length of a *successful* response
+        (max 16 per the protocol's own frame format); an error response is
+        always a fixed 1-byte status instead, detected from OBJ == 0xFF in
+        the 3-byte header, so we never have to guess which one we'll get.
+        Reading the exact byte count - instead of a fixed oversized buffer
+        - avoids blocking for the full serial timeout on every call.
+        """
+        self._wait_for_min_interval()
         telegram = protocol.build_telegram(telegram_type, self.node, obj, data)
         self._serial.reset_input_buffer()
         self._serial.write(telegram)
-        response = self._serial.read(128)
+        self._last_transfer_at = time.monotonic()
+
+        header = self._serial.read(3)  # SD, DN, OBJ
+        if len(header) < 3:
+            return protocol.parse_response(header)  # too short; let parse_response report it
+        payload_len = 1 if header[2] == 0xFF else expected_data_len
+        response = header + self._serial.read(payload_len + 2)  # + CS0, CS1
         return protocol.parse_response(response)
 
-    def _read(self, obj: int) -> bytes:
-        return self._transfer(protocol.TYPE_QUERY, obj)
+    def _read(self, obj: int, expected_data_len: int = 16) -> bytes:
+        return self._transfer(protocol.TYPE_QUERY, obj, expected_data_len=expected_data_len)
 
     def _read_str(self, obj: int) -> str:
         return self._read(obj).decode("ascii", errors="replace").strip("\x00").strip()
 
     def _read_float(self, obj: int) -> float:
-        return struct.unpack(">f", self._read(obj))[0]
+        return struct.unpack(">f", self._read(obj, expected_data_len=4))[0]
 
     def _read_uint16(self, obj: int) -> int:
-        return struct.unpack(">H", self._read(obj))[0]
+        return struct.unpack(">H", self._read(obj, expected_data_len=2))[0]
 
     def _write_uint16(self, obj: int, value: int) -> None:
         data = bytes([(value >> 8) & 0xFF, value & 0xFF])
-        self._transfer(protocol.TYPE_SEND, obj, data)
+        self._transfer(protocol.TYPE_SEND, obj, data, expected_data_len=2)
 
     def _write_control(self, mask: int, data: int) -> None:
         self._transfer(protocol.TYPE_SEND, OBJ_CONTROL, bytes([mask, data]))
@@ -157,7 +191,7 @@ class PS2000B:
         self._write_control(0x0A, 0x0A)
 
     def get_control_state(self) -> dict:
-        data = self._read(OBJ_CONTROL)
+        data = self._read(OBJ_CONTROL, expected_data_len=2)
         return {
             "remote": bool(data[0] & 0x01),
             "output_on": bool(data[1] & 0x01),
@@ -211,11 +245,11 @@ class PS2000B:
 
     def read_actual(self) -> dict:
         """Read live measured voltage/current and status flags (object 71)."""
-        return self._decode_measurement(self._read(OBJ_ACTUAL))
+        return self._decode_measurement(self._read(OBJ_ACTUAL, expected_data_len=6))
 
     def read_setpoints(self) -> dict:
         """Read the device's own view of the current setpoints (object 72)."""
-        return self._decode_measurement(self._read(OBJ_SETPOINTS))
+        return self._decode_measurement(self._read(OBJ_SETPOINTS, expected_data_len=6))
 
     def _decode_measurement(self, data: bytes) -> dict:
         status0, status1 = data[0], data[1]

@@ -79,5 +79,16 @@ in remote mode).
 .venv/bin/pytest
 ```
 
-Tests cover telegram framing, checksums, and percent/real-value conversion —
+Tests cover telegram framing, checksums, percent/real-value conversion, and
+the response-sizing/pacing logic in `_transfer` (via a fake serial object) —
 no hardware connection is required to run them.
+
+### Polling / logging rate
+
+`read_actual()` / `read_setpoints()` are capped at **~20 Hz (50 ms/sample)**.
+That's not a serial-line limit — it's Elektro-Automatik's documented minimum
+spacing between telegrams, which `_transfer` enforces explicitly. Each call
+also reads only the exact number of bytes a response implies, instead of
+blocking on an oversized buffer, so the achieved rate is that 50 ms floor
+itself rather than an accidental multiple of it. Measured sustained ~19.8 Hz
+against a real EA-PS 2084-10B.
