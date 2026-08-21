@@ -1,26 +1,49 @@
 #!/usr/bin/env python3
-"""Enable the PSU output at a fixed 24 V / 5 A current limit.
+"""Enable the PSU output at a caller-specified voltage and current limit.
 
-Usage: python enable_PSU.py [port]
-Defaults to /dev/ttyACM0 if no port is given. The output is left enabled
-when the script exits; run again with a different voltage/current in the
-constants below, or call psu.disable_output() via the library, to change it.
+Usage: python enable_PSU.py --volt 24 --amp 5 [--port /dev/ttyACM0]
+
+Both --volt and --amp are required; the script refuses to power on the
+output without an explicit setpoint. Prompts for confirmation before
+touching the hardware, and leaves the output enabled when it exits.
 """
 
+import argparse
 import sys
 
 from ea_psu_control import DEFAULT_PORT, PS2000B
 
-VOLTAGE = 24.0
-CURRENT_LIMIT = 5.0
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Enable the PSU output at a configured voltage and current limit."
+    )
+    parser.add_argument("--volt", type=float, default=None, help="Voltage setpoint, in volts")
+    parser.add_argument("--amp", type=float, default=None, help="Current limit, in amps")
+    parser.add_argument("--port", default=DEFAULT_PORT, help=f"Serial port (default: {DEFAULT_PORT})")
+    return parser.parse_args()
 
 
 def main() -> int:
-    port = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PORT
+    args = parse_args()
 
-    with PS2000B(port) as psu:
-        psu.set_current(CURRENT_LIMIT)  # set the current limit before raising voltage
-        psu.set_voltage(VOLTAGE)
+    if args.volt is None or args.amp is None:
+        print("Voltage & Current Limits not configured!")
+        print("Exiting power-on for safety reasons!")
+        return 1
+
+    print("####### Safety Warning ######")
+    print("Starting PSU....")
+    answer = input(
+        f"Are you sure you want to set {args.volt} Volt and {args.amp} Amp for the session? [y/N]: "
+    )
+    if answer.strip().lower() not in ("y", "yes"):
+        print("Aborted - PSU output was not enabled.")
+        return 1
+
+    with PS2000B(args.port) as psu:
+        psu.set_current(args.amp)  # set the current limit before raising voltage
+        psu.set_voltage(args.volt)
         psu.enable_output()
 
         state = psu.read_actual()
